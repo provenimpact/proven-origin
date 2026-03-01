@@ -1,0 +1,76 @@
+name: update-definition
+
+on:
+  repository_dispatch:
+    types: [artifact-released]
+
+permissions:
+  contents: write  # required to commit and push definition.cue updates
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Inject version into definition.cue
+        env:
+          ARTIFACT: ${{ github.event.client_payload.artifact }}
+          VERSION:  ${{ github.event.client_payload.version }}
+          URL:      ${{ github.event.client_payload.url }}
+          SHA256:   ${{ github.event.client_payload.sha256 }}
+        run: |
+          FILE="artifacts/${ARTIFACT}/definition.cue"
+
+          python3 - <<'PYEOF'
+          import os, sys
+
+          artifact = os.environ["ARTIFACT"]
+          version  = os.environ["VERSION"]
+          url      = os.environ["URL"]
+          sha256   = os.environ["SHA256"]
+          file_path = f"artifacts/{artifact}/definition.cue"
+
+          with open(file_path) as f:
+              content = f.read()
+
+          # Build the new version block (tab-indented to match CUE style)
+          new_entry = f'\t"{version}": {{\n\t\turl:    "{url}"\n\t\tsha256: "{sha256}"\n\t}}'
+
+          # Guard against double-insertion
+          if f'"{version}":' in content:
+              print(f"Version {version} already present in {file_path} — skipping.")
+              sys.exit(0)
+
+          # Insert just before the closing brace of the versions block
+          # (the last '}' in the file closes the versions struct)
+          close = content.rfind('\n}')
+          if close == -1:
+              print(f"ERROR: could not find closing brace in {file_path}", file=sys.stderr)
+              sys.exit(1)
+
+          updated = content[:close] + '\n' + new_entry + '\n' + content[close:]
+
+          with open(file_path, 'w') as f:
+              f.write(updated)
+
+          print(f"Added {artifact} v{version} to {file_path}")
+          PYEOF
+
+      - name: Commit and push
+        env:
+          ARTIFACT: ${{ github.event.client_payload.artifact }}
+          VERSION:  ${{ github.event.client_payload.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "artifacts/${ARTIFACT}/definition.cue"
+          # Skip if nothing changed (idempotent re-runs)
+          if git diff --cached --exit-code; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: add ${ARTIFACT} v${VERSION}"
+          git push
